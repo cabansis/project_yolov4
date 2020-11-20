@@ -270,7 +270,7 @@ class Coco_dataset(Dataset):
         return len(self.img_ids)
 
 def yolo_collate_fn(batch):
-    imgs, targets = batch[:][0], batch[:][1]
+    # imgs, targets = batch[:][0], batch[:][1]
     imgs = [batch[i][0] for i in range(len(batch))]
     targets = [batch[i][1] for i in range(len(batch))]
     imgs = torch.stack(imgs, dim=0).div_(255.0)
@@ -297,7 +297,7 @@ def yolo_collate_fn(batch):
 
 
 if __name__ == "__main__":
-    dataset = Coco_dataset('/home/baodi/data/cocodataset', train=False)
+    dataset = Coco_dataset('/home/baodi/data/cocodataset', train=True)
     num = random.randint(0, len(dataset))
     max_obj = 0
     max_id = 0

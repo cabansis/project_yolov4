@@ -1,4 +1,4 @@
-from cocodataset import Coco_dataset, get_original_img_boxes, load_class_names, save_image_boxes
+from cocodataset import Coco_dataset, get_original_img_boxes, load_class_names, save_image_boxes, yolo_collate_fn
 from models import DarkNet, get_iou, post_process
 
 import os 
@@ -121,7 +121,7 @@ class Yolo_loss(nn.Module):
 
             pred_truth_ious_best, _ = torch.max(pred_truth_ious, dim=1)
             pred_truth_ious_valid = pred_truth_ious_best >= self.iou_threshold
-            pred_truth_ious_valid = pred_truth_ious_valid.view(pred.shape[:-1])
+            pred_truth_ious_valid = pred_truth_ious_valid.view(pred[b].shape[:-1])
             # pprint(pred_truth_ious_best.shape)
             obj_mask[b] = ~pred_truth_ious_valid
 
@@ -134,22 +134,25 @@ class Yolo_loss(nn.Module):
 
                 obj_mask[b, anchor_i, j, i] = 1
                 tgt_mask[b, anchor_i, j, i, :] = 1
-                target[b, anchor_i, j, i, 0] = truth_x_all[b, obj_i] - truth_i_all[b, obj_i].to(torch.float)
-                target[b, anchor_i, j, i, 1] = truth_y_all[b, obj_i] - truth_j_all[b, obj_i].to(torch.float)
-                target[b, anchor_i, j, i, 2] = torch.log(truth_w_all[b, obj_i] / (self.masked_anchors[output_id][anchor_i, 0] + 1e-6))
-                target[b, anchor_i, j, i, 3] = torch.log(truth_h_all[b, obj_i] / (self.masked_anchors[output_id][anchor_i, 1] + 1e-6))
+                target[b, anchor_i, j, i, 0] = truth_x_all[b, obj_i]
+                target[b, anchor_i, j, i, 1] = truth_y_all[b, obj_i]
+                target[b, anchor_i, j, i, 2] = truth_w_all[b, obj_i]
+                target[b, anchor_i, j, i, 3] = truth_h_all[b, obj_i]
                 target[b, anchor_i, j, i, 4] = 1
                 target[b, anchor_i, j, i, 5+labels[b, obj_i, 4].to(torch.int16).cpu().numpy()] = 1
                 tgt_scale[b, anchor_i, j, i, :] = torch.sqrt(2 - truth_w_all[b, obj_i] * truth_h_all[b, obj_i] / fsize / fsize)
 
         return obj_mask, tgt_mask, tgt_scale, target
 
-    def iou_loss(self, pred_boxes, gt_boxes, iou_type='ciou'):
+    def iou_loss(self, pred_boxes, gt_boxes, iou_type='ciou', fsize=13):
         '''
         get iou loss 
         pred_boxes and gt_boxes are both (cx, cy, w, h)
         '''
         assert(pred_boxes.shape[0] == gt_boxes.shape[0])
+        target_scale = torch.zeros((gt_boxes.shape[0], 1), dtype=torch.float32, device=pred_boxes.device)
+        target_scale = 2 - (gt_boxes[..., 2] * gt_boxes[..., 3]) / fsize**2
+
         pred_tl = pred_boxes[..., :2] - pred_boxes[..., 2:4] / 2
         pred_br = pred_boxes[..., :2] + pred_boxes[..., 2:4] / 2
         gt_tl   = gt_boxes[..., :2] - gt_boxes[..., 2:4] / 2
@@ -173,26 +176,26 @@ class Yolo_loss(nn.Module):
 
         if iou_type == 'giou':
             gious = ious - uion_areas / (conv_areas + 1e-16)
-            return torch.sum(1 - gious)
+            return torch.sum((1 - gious)*target_scale)
         elif iou_type == 'diou' or iou_type == 'ciou':
             conv_distance = torch.pow(conv_br - conv_tl, 2).sum(dim=-1) + 1e-16
             center_distance = torch.pow(pred_boxes[..., :2] - gt_boxes[..., :2], 2).sum(dim=-1)
             if iou_type == 'diou':
                 dious = ious - center_distance / conv_distance
-                return torch.sum(1-dious)
+                return torch.sum((1-dious)*target_scale)
             elif iou_type == 'ciou':
                 v = (4 / (np.pi ** 2)) * torch.pow(torch.atan(pred_boxes[..., 2] / pred_boxes[..., 3]) - torch.atan(gt_boxes[..., 2] / gt_boxes[..., 3]), 2)
                 with torch.no_grad():
                     alpha = v / (1 - ious + v + 1e-16)
                 cious = ious - center_distance / conv_distance - alpha * v
                 cious = torch.clamp(cious, min=-1.0, max=1.0)
-                return torch.sum(1-cious)
+                return torch.sum((1-cious)*target_scale)
 
 
 
-    def forward(self, outfeatures, truth_target=None):
+    def forward(self, outfeatures, truth_target):
         assert(len(outfeatures) == 3)
-        loss, loss_obj, loss_class, loss_boxes, loss_xy, loss_l2 = 0, 0, 0, 0, 0, 0
+        loss, loss_obj, loss_class, loss_iou = 0, 0, 0, 0
         boxes = truth_target['boxes'].to(device)
         classes = truth_target['labels'].unsqueeze(2).to(device)
         labels = torch.cat((boxes, classes), dim=2)
@@ -223,51 +226,104 @@ class Yolo_loss(nn.Module):
             
             loss_obj += F.binary_cross_entropy(input=output[..., 4], target=target[..., 4], reduction='sum')
             loss_class += F.binary_cross_entropy(input=output[..., 5:], target=target[..., 5:], reduction='sum')
+            # input_label = output[..., 5:].reshape(-1, self.n_classes)
+            # class_label = torch.argmax(target[..., 5:], dim=-1).view(input_label.shape[0],)
+            # loss_class += F.cross_entropy(input=input_label, target=class_label, reduction='sum')
             
-            loss_xy += F.binary_cross_entropy(input=output[..., :2], target=target[..., :2], weight=tgt_scale*tgt_scale, reduction='sum')
-            loss_l2 += F.mse_loss(input=output, target=target, reduction='sum')
-
             # iou losses for boxes
             target_boxes = target[..., :4].clone()
             target_boxes = target_boxes.contiguous().view(-1, 4)
-            output_boxes = output[..., :4].clone()
-            output_boxes = output_boxes.contiguous().view(-1, 4)
+            
+            output_boxes = pred.contiguous().view(-1, 4)
 
             target_boxes_nonzero = torch.nonzero(torch.sum(target_boxes, dim=-1), as_tuple=True)[0]
             target_boxes = target_boxes[target_boxes_nonzero]
-            output_boxes_nonzero = torch.nonzero(torch.sum(output_boxes, dim=-1), as_tuple=True)[0]
-            output_boxes = output_boxes[output_boxes_nonzero]
+            # output_boxes_nonzero = torch.nonzero(torch.sum(output_boxes, dim=-1), as_tuple=True)[0]
+            output_boxes = output_boxes[target_boxes_nonzero]
 
-            loss_iou = self.iou_loss(output_boxes, target_boxes)
+            loss_iou += self.iou_loss(output_boxes, target_boxes, fsize=fsize)
 
-            output[..., 2:4] *= tgt_scale
-            target[..., 2:4] *= tgt_scale
-            loss_boxes += F.mse_loss(input=output[..., 2:4], target=target[..., 2:4], reduction='sum')
+        loss = loss_obj + loss_class + loss_iou
+        return loss, loss_obj, loss_class, loss_iou
 
-        loss = loss_obj + loss_class + loss_boxes + loss_xy
-        return loss, loss_obj, loss_class, loss_boxes, loss_xy, loss_l2, loss_iou
+
+def train_one_epoch(model, data_loader, batchsize=4, device=None, epoch=0):
+    '''
+    train model one epoch
+    '''
+    # model.to(device)
+    criteria = Yolo_loss(device=device, batch_size=batchsize)
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    global_step = 0
+    losses, losses_obj, losses_class, losses_iou = 0, 0, 0, 0
+    for img, target in data_loader:
+        img = img.to(device)
+        if isinstance(target, dict):
+            target = {key: target[key].to(device) for key in target.keys()}
+        else:
+            target = target.to(device)
+        pred = model(img)
+        loss, loss_obj, loss_class, loss_iou = criteria(pred, target)
+        
+        losses += loss
+        losses_obj += losses_obj
+        losses_class += losses_class
+        losses_iou += losses_iou
+        loss.backward()
+        optimizer.zero_grad()
+        optimizer.step()
+        global_step = global_step + batchsize
+        if global_step % 200 == 0:
+            print("{}/{} :loss {:5.4f} loss_obj {:5.4f} loss_class {:5.4f} loss_iou {:5.4f}".format(epoch,
+                                                                                                    global_step,
+                                                                                                    loss/batchsize,
+                                                                                                    loss_obj/batchsize,
+                                                                                                    loss_class/batchsize,
+                                                                                                    loss_iou/batchsize))
+    return losses, losses_obj, losses_class, losses_iou
+    
+
+
+def train(model, data_loader, batchsize=4, epoch=30, device=None):
+    '''
+    train model
+    '''
+    model.to(device)
+    model.train()
+    data_size = len(data_loader.dataset)
+    for e in range(epoch):
+        print("start training epoch: {}".format(e))
+        losses, losses_obj, losses_class, losses_iou = train_one_epoch(model, data_loader, batchsize, device, e)
+        print("epoch {}: losses: {:5.4} losses_obj: {:5.4} losses_class: {:5.4} losses_iou: {:5.4}".format(losses/data_size,
+                                                                                                           losses_obj/data_size,
+                                                                                                           losses_class/data_size,
+                                                                                                           losses_iou/data_size))
+
+        
+    
 
 if __name__ == "__main__":
 
-    device = torch.device('cuda:6' if torch.cuda.is_available() else 'cpu')
+    batchsize = 4
+    device = torch.device('cuda:5' if torch.cuda.is_available() else 'cpu')
     model = DarkNet('./cfg/yolov4.cfg', True)
     model.load_weight('./data/yolov4.weights')
     model = model.to(device=device)
-    dataset = Coco_dataset('/home/baodi/data/cocodataset', False)
-    dataloader = DataLoader(dataset, batch_size=1)
+    dataset = Coco_dataset('/home/baodi/data/cocodataset', train=True)
+    dataloader = DataLoader(dataset, batch_size=batchsize, collate_fn=yolo_collate_fn)
+    print("dataloader size : {}".format(len(dataloader.dataset)))
 
-    img, target = next(iter(dataloader))
-    # pprint(img)
-    img = img.to(torch.float).to(device)
+    # img, target = next(iter(dataloader))
+    # # pprint(img)
+    # img = img.to(torch.float).to(device)
 
-    outfeatures = model(img)
+    # outfeatures = model(img)
 
-    yololoss = Yolo_loss(device=device)
-    loss, loss_obj, loss_class, loss_boxes, loss_xy, loss_l2, loss_iou = yololoss(outfeatures, target)
-    print('loss: ', loss.cpu().detach().numpy())
-    print('loss_obj: ', loss_obj.cpu().detach().numpy())
-    print('loss_class: ', loss_class.cpu().detach().numpy())
-    print('loss_boxes: ', loss_boxes.cpu().detach().numpy())
-    print('loss_xy: ', loss_xy.cpu().detach().numpy())
-    print('loss_l2: ', loss_l2.cpu().detach().numpy())
-    print('loss_iou: ', loss_iou.cpu().detach().numpy())
+    # yololoss = Yolo_loss(device=device, batch_size=batchsize)
+    # loss, loss_obj, loss_class, loss_iou = yololoss(outfeatures, target)
+    # print('loss: ', loss.cpu().detach().numpy())
+    # print('loss_obj: ', loss_obj.cpu().detach().numpy())
+    # print('loss_class: ', loss_class.cpu().detach().numpy())
+    # print('loss_iou: ', loss_iou.cpu().detach().numpy())
+
+    train(model, dataloader, batchsize=batchsize, device=device)
