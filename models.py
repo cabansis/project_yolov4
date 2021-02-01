@@ -165,7 +165,7 @@ class Yolo_layer(nn.Module):
         x = x.view(batch_size, num_channels, height*width)
         x = x.transpose(1, 2).contiguous()
         x = x.view(batch_size, height*width*num_anchors, num_classes+5)
-        # 2. sigmoid to x classes' pro and obj pro
+        # 2. sigmoid to x classes' pro and obj pro and xy
         x[:, :, [0,1]] = torch.sigmoid(x[:, :, [0,1]])
         x[:, :, 4:] = torch.sigmoid(x[:, :, 4:])
         # 3. add offset to bboxes 
@@ -485,11 +485,11 @@ class DarkNet(nn.Module):
                     
 
 if __name__ == "__main__":
-    # model_blocks = get_model_from_cfg('./cfg/yolov4.cfg')
-    # net = create_network(model_blocks)
-    # for item in model_blocks:
-    #     pprint(item)
-    # pprint(net)
+    model_blocks = get_model_from_cfg('./cfg/yolov4.cfg')
+    net = create_network(model_blocks)
+    for item in model_blocks:
+        pprint(item)
+    pprint(net)
 
     # x = torch.randn((16, 3, 608, 608))
     # model_train = DarkNet('./cfg/yolov4.cfg')
@@ -497,47 +497,47 @@ if __name__ == "__main__":
     # pprint(type(result))
     # pprint(len(result))
     # pprint([r.shape for r in result])
-    print('-'*55)
-    b1 = torch.tensor([[0,0,2,2], [0,0,4,4]]).to(torch.float)
-    b2 = torch.tensor([[0,0,2,2], [0,0,2,4], [1,1,4,4],[4,5,5,6]]).to(torch.float)
-    ious = get_iou(b1, b2, iou_type='diou')
-    pprint(ious)
+    # print('-'*55)
+    # b1 = torch.tensor([[0,0,2,2], [0,0,4,4]]).to(torch.float)
+    # b2 = torch.tensor([[0,0,2,2], [0,0,2,4], [1,1,4,4],[4,5,5,6]]).to(torch.float)
+    # ious = get_iou(b1, b2, iou_type='diou')
+    # pprint(ious)
 
-    model_val = DarkNet('./cfg/yolov4.cfg', False)
-    model_val.load_weight('./data/yolov4.weights')
-    # pprint(model_val.get_anchors())
-    # val_result = model_val(x)
-    # pprint(type(val_result))
-    # pprint(val_result.shape)
-    with torch.no_grad():
+    # model_val = DarkNet('./cfg/yolov4.cfg', False)
+    # model_val.load_weight('./data/yolov4.weights')
+    # # pprint(model_val.get_anchors())
+    # # val_result = model_val(x)
+    # # pprint(type(val_result))
+    # # pprint(val_result.shape)
+    # with torch.no_grad():
 
-        model_val.eval()
-        img = cv2.imread('./data/dog.jpg')
-        img = cv2.resize(img, (608, 608), interpolation=cv2.INTER_CUBIC)
-        new_img = img.copy()
-        img = np.transpose(img, (2, 0, 1))
-        img = img[np.newaxis, :, :, :] / 255.0
-        img = torch.tensor(img).to(torch.float)
-        result = model_val(img)
-        result = post_process(result)
-        boxes = result[0]
-        pprint(boxes.shape)
-        num_boxes = 0
-        bboxes = []
-        classes = []
-        classes_name = load_class_names('./data/coco.names')
-        for box in boxes:
-            # if box[4] > 0.5:
-            num_boxes += 1
-            rect = box[:4]
-            bboxes.append(rect.unsqueeze(0))
-            classes.append(classes_name[box[-1].to(torch.int)])
+    #     model_val.eval()
+    #     img = cv2.imread('./data/dog.jpg')
+    #     img = cv2.resize(img, (608, 608), interpolation=cv2.INTER_CUBIC)
+    #     new_img = img.copy()
+    #     img = np.transpose(img, (2, 0, 1))
+    #     img = img[np.newaxis, :, :, :] / 255.0
+    #     img = torch.tensor(img).to(torch.float)
+    #     result = model_val(img)
+    #     result = post_process(result)
+    #     boxes = result[0]
+    #     pprint(boxes.shape)
+    #     num_boxes = 0
+    #     bboxes = []
+    #     classes = []
+    #     classes_name = load_class_names('./data/coco.names')
+    #     for box in boxes:
+    #         # if box[4] > 0.5:
+    #         num_boxes += 1
+    #         rect = box[:4]
+    #         bboxes.append(rect.unsqueeze(0))
+    #         classes.append(classes_name[box[-1].to(torch.int)])
 
-        bboxes = torch.cat(bboxes, dim=0)
-        # pprint(boxes[boxes[:, 4]>0.5])
+    #     bboxes = torch.cat(bboxes, dim=0)
+    #     # pprint(boxes[boxes[:, 4]>0.5])
         
-        print("box num is {}: ".format(num_boxes))
-        save_image_boxes(new_img, bboxes, 'imgpredicboxes.jpg', classes)
+    #     print("box num is {}: ".format(num_boxes))
+    #     save_image_boxes(new_img, bboxes, 'imgpredicboxes.jpg', classes)
 
         # post = post_process(pre_result)
 

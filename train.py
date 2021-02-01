@@ -1,5 +1,6 @@
 from cocodataset import Coco_dataset, get_original_img_boxes, load_class_names, save_image_boxes, yolo_collate_fn
 from models import DarkNet, get_iou, post_process
+from yolo_utils import evaluate
 
 import os 
 import numpy as np 
@@ -104,6 +105,7 @@ class Yolo_loss(nn.Module):
             truth_boxes = torch.zeros((n_objs, 4), dtype=torch.float, device=self.device)
             truth_boxes[:, 2] = truth_w_all[b, :n_objs]
             truth_boxes[:, 3] = truth_h_all[b, :n_objs]
+            # get the most suitable anchor for each truth box
             truth_anchors_ious = get_iou(truth_boxes, self.ref_anchors[output_id])
             match_all_anchors = torch.argmax(truth_anchors_ious, dim=1)
             match_anchors = match_all_anchors % 3
@@ -247,15 +249,16 @@ class Yolo_loss(nn.Module):
         return loss, loss_obj, loss_class, loss_iou
 
 
-def train_one_epoch(model, data_loader, batchsize=4, device=None, epoch=0):
+def train_one_epoch(model, data_loader, criteria, optimizer, scheduler=None, device=None, epoch=0):
     '''
     train model one epoch
     '''
     # model.to(device)
-    criteria = Yolo_loss(device=device, batch_size=batchsize)
-    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    # criteria = Yolo_loss(device=device, batch_size=batchsize)
+    # optimizer = optim.Adam(model.parameters(), lr=1e-4)
     global_step = 0
     losses, losses_obj, losses_class, losses_iou = 0, 0, 0, 0
+    model.train()
     for img, target in data_loader:
         img = img.to(device)
         if isinstance(target, dict):
@@ -272,6 +275,7 @@ def train_one_epoch(model, data_loader, batchsize=4, device=None, epoch=0):
         loss.backward()
         optimizer.zero_grad()
         optimizer.step()
+        scheduler.step()
         global_step = global_step + batchsize
         if global_step % 200 == 0:
             print("{}/{} :loss {:5.4f} loss_obj {:5.4f} loss_class {:5.4f} loss_iou {:5.4f}".format(epoch,
@@ -280,6 +284,7 @@ def train_one_epoch(model, data_loader, batchsize=4, device=None, epoch=0):
                                                                                                     loss_obj/batchsize,
                                                                                                     loss_class/batchsize,
                                                                                                     loss_iou/batchsize))
+    # torch.save
     return losses, losses_obj, losses_class, losses_iou
     
 
@@ -288,29 +293,53 @@ def train(model, data_loader, batchsize=4, epoch=30, device=None):
     '''
     train model
     '''
+    device_ids = [4, 5, 6, 7]
+    model = nn.DataParallel(model, device_ids=device_ids)
     model.to(device)
     model.train()
+    def burnin_scheduler(epoch):
+        factor = 1.0
+        if epoch < 10:
+            factor = 1.0
+        elif epoch < 20:
+            factor = 0.5
+        elif epoch < 30:
+            factor = 0.1
+        return factor
+
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = optim.lr_scheduler.LambdaLR(optimizer, burnin_scheduler, last_epoch=-1)
+    criteria = Yolo_loss(device=device, batch_size=batchsize)    
+
     data_size = len(data_loader.dataset)
     for e in range(epoch):
         print("start training epoch: {}".format(e))
-        losses, losses_obj, losses_class, losses_iou = train_one_epoch(model, data_loader, batchsize, device, e)
-        print("epoch {}: losses: {:5.4} losses_obj: {:5.4} losses_class: {:5.4} losses_iou: {:5.4}".format(losses/data_size,
+        losses, losses_obj, losses_class, losses_iou = train_one_epoch(model, 
+                                                                       data_loader, 
+                                                                       criteria, 
+                                                                       optimizer, 
+                                                                       scheduler, 
+                                                                       device, 
+                                                                       e)
+        print("epoch {}: losses: {:5.4} losses_obj: {:5.4} losses_class: {:5.4} losses_iou: {:5.4}".format(e,
+													                                                       losses/data_size,
                                                                                                            losses_obj/data_size,
                                                                                                            losses_class/data_size,
                                                                                                            losses_iou/data_size))
+        
 
         
     
 
 if __name__ == "__main__":
 
-    batchsize = 4
-    device = torch.device('cuda:5' if torch.cuda.is_available() else 'cpu')
+    batchsize = 16
+    device = torch.device('cuda:4' if torch.cuda.is_available() else 'cpu')
     model = DarkNet('./cfg/yolov4.cfg', True)
     model.load_weight('./data/yolov4.weights')
     model = model.to(device=device)
-    dataset = Coco_dataset('/home/baodi/data/cocodataset', train=True)
-    dataloader = DataLoader(dataset, batch_size=batchsize, collate_fn=yolo_collate_fn)
+    dataset = Coco_dataset('/root/data/cocodataset', train=True)
+    dataloader = DataLoader(dataset, batch_size=batchsize, collate_fn=yolo_collate_fn, shuffle=True, drop_last=True)
     print("dataloader size : {}".format(len(dataloader.dataset)))
 
     # img, target = next(iter(dataloader))

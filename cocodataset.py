@@ -12,7 +12,7 @@ import cv2
 import random
 
 def get_class_name(cat):
-    class_names = load_class_names("/home/baodi/yolo_projects/project_yolov4/data/coco.names")
+    class_names = load_class_names("./data/coco.names")
     if cat >= 1 and cat <= 11:
         cat = cat - 1
     elif cat >= 13 and cat <= 25:

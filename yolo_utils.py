@@ -78,12 +78,12 @@ def evaluate(model, data_loader, device):
 
 if __name__ == "__main__":
 
-    device = torch.device('cuda:4')
+    device = torch.device('cuda:1')
     model_val = DarkNet('./cfg/yolov4.cfg', False)
     model_val.load_weight('./data/yolov4.weights')
 
-    dataset = Coco_dataset('/home/baodi/data/cocodataset', train=False)
-    data_loader = DataLoader(dataset, 3, True, num_workers=4, collate_fn=yolo_collate_fn)
+    dataset = Coco_dataset('/root/data/cocodataset', train=False)
+    data_loader = DataLoader(dataset, 3, True, collate_fn=yolo_collate_fn)
 
     coco_evaluator = evaluate(model_val, data_loader, device)
     stats = coco_evaluator.coco_eval['bbox'].stats
